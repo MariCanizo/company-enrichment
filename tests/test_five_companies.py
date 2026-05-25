@@ -20,6 +20,7 @@ import pytest
 from company_enrichment.config import DATA_DIR, OUTPUT_DIR
 from company_enrichment.enricher import enrich_many
 from company_enrichment.models import CompanyInput
+from company_enrichment.scraper import extract_facts_from_html
 
 TEST_FILE = DATA_DIR / "test_companies.json"
 
@@ -56,6 +57,7 @@ async def test_enrich_five_companies(companies: List[CompanyInput]):
 
         saved = json.loads(out_file.read_text(encoding="utf-8"))
         assert saved["record"]["cpyId"] == record.cpyId
+        assert saved["record"]["field_sources"]
 
 
 @pytest.mark.parametrize(
@@ -73,3 +75,58 @@ def test_fixture_tickers(name: str, expected_ticker: str):
     from company_enrichment.llm import _MOCK_FIXTURES
 
     assert _MOCK_FIXTURES[name.lower()]["stock_symbol"] == expected_ticker
+
+
+def test_extract_facts_from_realistic_html():
+    html = """
+    <html>
+      <head>
+        <meta property="og:image" content="/images/company-campus.jpg">
+        <script type="application/ld+json">
+          {
+            "@context": "https://schema.org",
+            "@type": "Organization",
+            "url": "https://example.com",
+            "telephone": "+1 212 555 0100",
+            "slogan": "Better data for teams",
+            "mission": "Help teams validate company information with confidence.",
+            "logo": "/assets/logo.png",
+            "sameAs": ["https://www.linkedin.com/company/example-company"],
+            "address": {
+              "@type": "PostalAddress",
+              "streetAddress": "123 Market Street",
+              "addressLocality": "New York",
+              "addressRegion": "NY",
+              "postalCode": "10001",
+              "addressCountry": "United States"
+            }
+          }
+        </script>
+      </head>
+      <body>
+        <img alt="Example Company logo" src="/brand/logo.png">
+        <a href="/careers">Careers</a>
+        <a href="/faq">FAQ</a>
+        <a href="https://twitter.com/example">Twitter</a>
+      </body>
+    </html>
+    """
+
+    fields, logo_url, image_url = extract_facts_from_html(
+        html,
+        page_url="https://example.com/about",
+        main_url="https://example.com",
+    )
+
+    assert fields["phone"] == "+1 212 555 0100"
+    assert fields["address_line_1"] == "123 Market Street"
+    assert fields["address_line_2"] == "New York, NY, 10001"
+    assert fields["country"] == "United States"
+    assert fields["career_url"] == "https://example.com/careers"
+    assert fields["faq_url"] == "https://example.com/faq"
+    assert fields["linkedin_url"] == "https://www.linkedin.com/company/example-company"
+    assert fields["twitter_url"] == "https://twitter.com/example"
+    assert fields["slogan"] == "Better data for teams"
+    assert fields["mission"] == "Help teams validate company information with confidence."
+    assert logo_url == "https://example.com/assets/logo.png"
+    assert image_url == "https://example.com/images/company-campus.jpg"

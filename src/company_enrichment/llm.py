@@ -12,6 +12,7 @@ Use ONLY the provided extracted web text and URLs.
 Return JSON matching the schema exactly.
 Use null for any field not supported by the provided text.
 Do not invent phone numbers, addresses, slogans, missions, or social URLs.
+Prefer extracted_fields when they are present because they were parsed directly from HTML metadata or links.
 stock_symbol: ticker only (e.g. DHR), or "N/A - private company" if private.
 employees: one value only, not a range.
 Plain text only, ISO-8859-1 compatible punctuation."""
@@ -62,8 +63,10 @@ _MOCK_FIXTURES: Dict[str, Dict[str, Any]] = {
 async def enrich_structured(bundle: ScrapeBundle) -> Dict[str, Any]:
     if MOCK_LLM or not OPENAI_API_KEY:
         key = bundle.company_name.strip().lower()
-        base = _MOCK_FIXTURES.get(key, {"company_name": bundle.company_name})
+        base = dict(_MOCK_FIXTURES.get(key, {"company_name": bundle.company_name}))
         base["main_url"] = base.get("main_url") or bundle.main_url
+        for field, value in bundle.extracted_fields.items():
+            base.setdefault(field, value)
         return base
 
     return await _openai_structured(bundle)
@@ -91,6 +94,7 @@ async def _openai_structured(bundle: ScrapeBundle) -> Dict[str, Any]:
     user_payload = {
         "company_name": bundle.company_name,
         "main_url": bundle.main_url,
+        "extracted_fields": bundle.extracted_fields,
         "pages": bundle.pages,
         "search_snippets": bundle.search_snippets,
     }

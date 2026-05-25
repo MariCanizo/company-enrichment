@@ -20,13 +20,18 @@ logger = logging.getLogger(__name__)
 async def enrich_company(company: CompanyInput) -> CompanyRecord:
     bundle = await build_scrape_bundle(company)
     structured = await enrich_structured(bundle)
+    structured = _merge_scraped_fields(structured, bundle)
     socials = extract_social_links(bundle.pages.values())
-    structured.update({k: v for k, v in socials.items() if v})
+    for key, value in socials.items():
+        if value and not structured.get(key):
+            structured[key] = value
+            bundle.field_sources[key] = "scraped page text"
 
     description, wordle = await enrich_narrative(structured)
     structured["company_description"] = description
     structured["wordle_text"] = wordle
     structured["cpyId"] = company.cpyId
+    structured["field_sources"] = bundle.field_sources
 
     record = CompanyRecord(**structured)
     record = _sanitize_record(record)
@@ -38,6 +43,17 @@ async def enrich_company(company: CompanyInput) -> CompanyRecord:
 
     _persist(record, errors)
     return record
+
+
+def _merge_scraped_fields(structured: dict, bundle) -> dict:
+    merged = dict(structured)
+    for key, value in bundle.extracted_fields.items():
+        if value and not merged.get(key):
+            merged[key] = value
+    if bundle.main_url and not merged.get("main_url"):
+        merged["main_url"] = bundle.main_url
+        bundle.field_sources["main_url"] = "search discovery"
+    return merged
 
 
 def _sanitize_record(record: CompanyRecord) -> CompanyRecord:
