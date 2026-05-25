@@ -3,7 +3,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List
+from typing import Iterable, List, Optional
 
 import httpx
 
@@ -79,15 +79,23 @@ async def _attach_images(record: CompanyRecord, bundle) -> CompanyRecord:
         follow_redirects=True,
         headers={"User-Agent": "CompanyEnrichmentBot/0.1"},
     ) as client:
-        logo = await download_and_save_jpg(
-            bundle.candidate_logo_url,
+        logo = await _download_first_valid_image(
+            bundle.candidate_logo_urls or [bundle.candidate_logo_url],
             img_dir / "logo.jpg",
             250,
             250,
             client,
         )
-        image = await download_and_save_jpg(
-            bundle.candidate_image_url,
+        if not logo:
+            logo = await _download_first_valid_image(
+                bundle.candidate_image_urls or [bundle.candidate_image_url],
+                img_dir / "logo.jpg",
+                250,
+                250,
+                client,
+            )
+        image = await _download_first_valid_image(
+            bundle.candidate_image_urls or [bundle.candidate_image_url],
             img_dir / "company.jpg",
             500,
             350,
@@ -96,6 +104,22 @@ async def _attach_images(record: CompanyRecord, bundle) -> CompanyRecord:
     record.upload_logo = logo
     record.company_image = image
     return record
+
+
+async def _download_first_valid_image(
+    candidates: Iterable[Optional[str]],
+    dest: Path,
+    max_width: int,
+    max_height: int,
+    client: httpx.AsyncClient,
+) -> Optional[str]:
+    for url in candidates:
+        if not url:
+            continue
+        path = await download_and_save_jpg(url, dest, max_width, max_height, client)
+        if path:
+            return path
+    return None
 
 
 def _persist(record: CompanyRecord, errors: List[str]) -> None:

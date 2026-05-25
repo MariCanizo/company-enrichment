@@ -112,7 +112,7 @@ def test_extract_facts_from_realistic_html():
     </html>
     """
 
-    fields, logo_url, image_url = extract_facts_from_html(
+    fields, logo_urls, image_urls = extract_facts_from_html(
         html,
         page_url="https://example.com/about",
         main_url="https://example.com",
@@ -128,5 +128,6 @@ def test_extract_facts_from_realistic_html():
     assert fields["twitter_url"] == "https://twitter.com/example"
     assert fields["slogan"] == "Better data for teams"
     assert fields["mission"] == "Help teams validate company information with confidence."
-    assert logo_url == "https://example.com/assets/logo.png"
-    assert image_url == "https://example.com/images/company-campus.jpg"
+    assert logo_urls[0] == "https://example.com/assets/logo.png"
+    assert "https://example.com/brand/logo.png" in logo_urls
+    assert image_urls[0] == "https://example.com/images/company-campus.jpg"

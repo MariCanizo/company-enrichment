@@ -57,6 +57,8 @@ class ScrapeBundle(BaseModel):
     pages: Dict[str, str] = Field(default_factory=dict)
     candidate_logo_url: Optional[str] = None
     candidate_image_url: Optional[str] = None
+    candidate_logo_urls: List[str] = Field(default_factory=list)
+    candidate_image_urls: List[str] = Field(default_factory=list)
     extracted_fields: Dict[str, str] = Field(default_factory=dict)
     field_sources: Dict[str, str] = Field(default_factory=dict)
     search_snippets: List[str] = Field(default_factory=list)

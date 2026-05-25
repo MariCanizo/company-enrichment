@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 from urllib.parse import urljoin
 
 import httpx
@@ -59,6 +59,7 @@ async def build_scrape_bundle(
             f"Visit {main_url} for official information."
         )
         bundle.candidate_logo_url = f"{main_url.rstrip('/')}/favicon.ico"
+        bundle.candidate_logo_urls = [bundle.candidate_logo_url]
         bundle.field_sources["main_url"] = "mock seed domain"
         return bundle
 
@@ -76,16 +77,18 @@ async def build_scrape_bundle(
                 resp = await client.get(url)
                 if resp.status_code >= 400:
                     continue
-                fields, logo_url, image_url = extract_facts_from_html(
+                fields, logo_urls, image_urls = extract_facts_from_html(
                     resp.text,
                     page_url=str(resp.url),
                     main_url=main_url,
                 )
                 _merge_extracted_fields(bundle, fields, str(resp.url))
-                if logo_url and not bundle.candidate_logo_url:
-                    bundle.candidate_logo_url = logo_url
-                if image_url and not bundle.candidate_image_url:
-                    bundle.candidate_image_url = image_url
+                _extend_unique(bundle.candidate_logo_urls, logo_urls)
+                _extend_unique(bundle.candidate_image_urls, image_urls)
+                if bundle.candidate_logo_urls and not bundle.candidate_logo_url:
+                    bundle.candidate_logo_url = bundle.candidate_logo_urls[0]
+                if bundle.candidate_image_urls and not bundle.candidate_image_url:
+                    bundle.candidate_image_url = bundle.candidate_image_urls[0]
 
                 text = _html_to_text(resp.text)
                 if len(text) > 200:
@@ -110,25 +113,25 @@ def extract_facts_from_html(
     html: str,
     page_url: str,
     main_url: str,
-) -> Tuple[Dict[str, str], Optional[str], Optional[str]]:
+) -> Tuple[Dict[str, str], List[str], List[str]]:
     """Extract deterministic facts before asking the LLM to fill gaps."""
     soup = BeautifulSoup(html, "html.parser")
     fields: Dict[str, str] = {}
-    logo_url: Optional[str] = None
-    image_url: Optional[str] = None
+    logo_urls: List[str] = []
+    image_urls: List[str] = []
 
     for node in _iter_jsonld_nodes(soup):
         _merge_dict(fields, _fields_from_jsonld(node, page_url))
-        logo_url = logo_url or _absolute_url(_first_url(node.get("logo")), page_url)
-        image_url = image_url or _absolute_url(_first_url(node.get("image")), page_url)
+        _extend_unique(logo_urls, _urls_from_value(node.get("logo"), page_url))
+        _extend_unique(image_urls, _urls_from_value(node.get("image"), page_url))
 
     _merge_dict(fields, _fields_from_links(soup, page_url))
     _merge_dict(fields, _fields_from_text(_html_to_text(html)))
 
-    logo_url = logo_url or _best_logo_url(soup, page_url, main_url)
-    image_url = image_url or _best_company_image_url(soup, page_url)
+    _extend_unique(logo_urls, _logo_urls(soup, page_url, main_url))
+    _extend_unique(image_urls, _company_image_urls(soup, page_url))
 
-    return fields, logo_url, image_url
+    return fields, logo_urls, image_urls
 
 
 def _merge_extracted_fields(bundle: ScrapeBundle, fields: Dict[str, str], source: str) -> None:
@@ -142,6 +145,12 @@ def _merge_dict(target: Dict[str, str], incoming: Dict[str, str]) -> None:
     for key, value in incoming.items():
         if value and not target.get(key):
             target[key] = value
+
+
+def _extend_unique(target: List[str], incoming: Iterable[Optional[str]]) -> None:
+    for value in incoming:
+        if value and value not in target:
+            target.append(value)
 
 
 def _iter_jsonld_nodes(soup: BeautifulSoup) -> Iterator[Dict[str, Any]]:
@@ -278,7 +287,8 @@ def _fields_from_text(text: str) -> Dict[str, str]:
     return fields
 
 
-def _best_logo_url(soup: BeautifulSoup, page_url: str, main_url: str) -> Optional[str]:
+def _logo_urls(soup: BeautifulSoup, page_url: str, main_url: str) -> List[str]:
+    candidates: List[str] = []
     for image in soup.find_all("img"):
         haystack = " ".join(
             [
@@ -291,19 +301,23 @@ def _best_logo_url(soup: BeautifulSoup, page_url: str, main_url: str) -> Optiona
         if "logo" in haystack:
             candidate = _absolute_url(_first_string(image.get("src")), page_url)
             if candidate:
-                return candidate
+                candidates.append(candidate)
 
     for rel_name in ("icon", "shortcut icon", "apple-touch-icon", "mask-icon"):
-        link = soup.find("link", rel=lambda rel: rel and rel_name in " ".join(rel).lower())
-        if link:
+        links = soup.find_all("link", rel=lambda rel: rel and rel_name in " ".join(rel).lower())
+        for link in links:
             candidate = _absolute_url(_first_string(link.get("href")), page_url)
             if candidate:
-                return candidate
+                candidates.append(candidate)
 
-    return f"{main_url.rstrip('/')}/favicon.ico"
+    candidates.append(f"{main_url.rstrip('/')}/favicon.ico")
+    unique: List[str] = []
+    _extend_unique(unique, candidates)
+    return unique
 
 
-def _best_company_image_url(soup: BeautifulSoup, page_url: str) -> Optional[str]:
+def _company_image_urls(soup: BeautifulSoup, page_url: str) -> List[str]:
+    candidates: List[str] = []
     for attr_name, attr_value in (
         ("property", "og:image"),
         ("name", "twitter:image"),
@@ -313,7 +327,7 @@ def _best_company_image_url(soup: BeautifulSoup, page_url: str) -> Optional[str]
         if tag:
             candidate = _absolute_url(_first_string(tag.get("content")), page_url)
             if candidate:
-                return candidate
+                candidates.append(candidate)
 
     for image in soup.find_all("img"):
         haystack = " ".join(
@@ -329,9 +343,11 @@ def _best_company_image_url(soup: BeautifulSoup, page_url: str) -> Optional[str]
         if any(word in haystack for word in ("hero", "company", "about", "building", "campus")):
             candidate = _absolute_url(_first_string(image.get("src")), page_url)
             if candidate:
-                return candidate
+                candidates.append(candidate)
 
-    return None
+    unique: List[str] = []
+    _extend_unique(unique, candidates)
+    return unique
 
 
 def _set_if_present(fields: Dict[str, str], key: str, value: Optional[str]) -> None:

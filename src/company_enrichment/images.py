@@ -2,6 +2,7 @@ import logging
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import httpx
 from PIL import Image, ImageDraw, ImageStat
@@ -25,7 +26,7 @@ async def download_and_save_jpg(
     try:
         resp = await client.get(url)
         resp.raise_for_status()
-        img = Image.open(BytesIO(resp.content))
+        img = _image_from_response(url, resp)
         img = img.convert("RGB")
         img.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
         if _is_low_information_image(img):
@@ -51,6 +52,21 @@ def placeholder_jpg(cpy_id: int, label: str, max_width: int, max_height: int) ->
     draw.text((16, max_height // 2 - 16), text, fill=(255, 255, 255))
     img.save(path, format="JPEG")
     return str(path)
+
+
+def _image_from_response(url: str, resp: httpx.Response) -> Image.Image:
+    content_type = resp.headers.get("content-type", "").lower()
+    suffix = Path(urlparse(url).path).suffix.lower()
+    if "svg" in content_type or suffix == ".svg":
+        try:
+            import cairosvg
+        except ImportError as exc:
+            raise RuntimeError("Install cairosvg to convert SVG logos to JPG") from exc
+
+        png_bytes = cairosvg.svg2png(bytestring=resp.content)
+        return Image.open(BytesIO(png_bytes))
+
+    return Image.open(BytesIO(resp.content))
 
 
 def _is_low_information_image(img: Image.Image) -> bool:
