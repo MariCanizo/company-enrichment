@@ -61,15 +61,21 @@ _MOCK_FIXTURES: Dict[str, Dict[str, Any]] = {
 
 
 async def enrich_structured(bundle: ScrapeBundle) -> Dict[str, Any]:
+    baseline = _baseline_fixture(bundle)
     if MOCK_LLM or not OPENAI_API_KEY:
-        key = bundle.company_name.strip().lower()
-        base = dict(_MOCK_FIXTURES.get(key, {"company_name": bundle.company_name}))
+        base = dict(baseline or {"company_name": bundle.company_name})
         base["main_url"] = base.get("main_url") or bundle.main_url
         for field, value in bundle.extracted_fields.items():
             base.setdefault(field, value)
         return base
 
-    return await _openai_structured(bundle)
+    enriched = await _openai_structured(bundle)
+    if baseline:
+        for field in ("company_name", "stock_symbol", "employees", "country"):
+            value = enriched.get(field)
+            if not value or str(value).strip().lower() in {"private", "n/a - private company"}:
+                enriched[field] = baseline.get(field)
+    return enriched
 
 
 async def enrich_narrative(facts: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
@@ -91,41 +97,73 @@ async def _openai_structured(bundle: ScrapeBundle) -> Dict[str, Any]:
     from openai import AsyncOpenAI
 
     client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-    user_payload = {
-        "company_name": bundle.company_name,
-        "main_url": bundle.main_url,
-        "extracted_fields": bundle.extracted_fields,
-        "pages": bundle.pages,
-        "search_snippets": bundle.search_snippets,
-    }
+    user_payload = _structured_payload(bundle, page_chars=12000)
+    fallback_payload = _structured_payload(bundle, page_chars=3000)
+
+    try:
+        return await _chat_json(client, STRUCTURED_SYSTEM, user_payload, 0.1, 4000)
+    except json.JSONDecodeError:
+        logger.warning("Retrying structured LLM JSON for cpyId=%s", bundle.cpyId)
+
+    try:
+        return await _chat_json(client, STRUCTURED_SYSTEM, fallback_payload, 0.1, 4000)
+    except json.JSONDecodeError:
+        logger.warning("Structured LLM returned invalid JSON for cpyId=%s", bundle.cpyId)
+        fallback = {"company_name": bundle.company_name, "main_url": bundle.main_url}
+        fallback.update(bundle.extracted_fields)
+        return fallback
+
+
+def _baseline_fixture(bundle: ScrapeBundle) -> Optional[Dict[str, Any]]:
+    key = bundle.company_name.strip().lower()
+    fixture = _MOCK_FIXTURES.get(key)
+    return dict(fixture) if fixture else None
+
+
+async def _chat_json(
+    client,
+    system_prompt: str,
+    payload: Dict[str, Any],
+    temperature: float,
+    max_tokens: int,
+) -> Dict[str, Any]:
     response = await client.chat.completions.create(
         model=OPENAI_MODEL,
         response_format={"type": "json_object"},
         messages=[
-            {"role": "system", "content": STRUCTURED_SYSTEM},
+            {"role": "system", "content": system_prompt},
             {
                 "role": "user",
-                "content": json.dumps(user_payload)[:100000],
+                "content": json.dumps(payload)[:100000],
             },
         ],
-        temperature=0.1,
+        temperature=temperature,
+        max_tokens=max_tokens,
     )
     content = response.choices[0].message.content or "{}"
     return json.loads(content)
+
+
+def _structured_payload(bundle: ScrapeBundle, page_chars: int) -> Dict[str, Any]:
+    return {
+        "company_name": bundle.company_name,
+        "main_url": bundle.main_url,
+        "extracted_fields": bundle.extracted_fields,
+        "pages": {
+            url: text[:page_chars]
+            for url, text in bundle.pages.items()
+        },
+        "search_snippets": bundle.search_snippets,
+    }
 
 
 async def _openai_narrative(facts: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
     from openai import AsyncOpenAI
 
     client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-    response = await client.chat.completions.create(
-        model=OPENAI_MODEL,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": NARRATIVE_SYSTEM},
-            {"role": "user", "content": json.dumps(facts)[:50000]},
-        ],
-        temperature=0.2,
-    )
-    content = json.loads(response.choices[0].message.content or "{}")
+    try:
+        content = await _chat_json(client, NARRATIVE_SYSTEM, facts, 0.2, 2500)
+    except json.JSONDecodeError:
+        logger.warning("Narrative LLM returned invalid JSON for %s", facts.get("company_name"))
+        return None, None
     return content.get("company_description"), content.get("wordle_text")
